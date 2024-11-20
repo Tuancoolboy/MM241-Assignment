@@ -148,25 +148,49 @@ class Policy2210xxx(Policy):
         for r in reversed(self.rewards):
             R = r + self.gamma * R
             returns.insert(0, R)
-        returns = torch.tensor(returns, device=self.device)
+        returns = torch.tensor(returns, device=self.device, requires_grad=True)  # Add requires_grad=True
+
+        # Convert lists to tensors
+        values = torch.cat(self.values)
+        log_probs = torch.stack(self.log_probs)
         
-        # Chuẩn hóa returns
-        if len(returns) > 1:
-            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+        # Calculate advantages
+        advantages = returns - values.detach()
         
-        # Tính loss và cập nhật policy
+        # Normalize advantages
+        if len(advantages) > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        # Calculate actor (policy) loss
         policy_loss = []
-        for log_prob, R in zip(self.log_probs, returns):
-            policy_loss.append(-log_prob * R)
+        entropy = []
+        for log_prob, advantage in zip(log_probs, advantages):
+            policy_loss.append(-log_prob * advantage.detach())  # Detach advantage
+            probs = torch.exp(log_prob)
+            entropy.append(-(probs * log_prob).sum())
         
         policy_loss = torch.stack(policy_loss).sum()
+        entropy_loss = -self.entropy_coef * torch.stack(entropy).sum()
+        actor_loss = policy_loss + entropy_loss
         
-        self.optimizer.zero_grad()
-        policy_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.policy_network.parameters(), 1.0)  # Thêm gradient clipping
-        self.optimizer.step()
+        # Calculate critic (value) loss
+        values = values.view(-1)  # Flatten values
+        returns = returns.view(-1)  # Flatten returns
+        value_loss = self.value_coef * F.mse_loss(values, returns)
         
-        # Giảm epsilon
+        # Update actor
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward(retain_graph=True)  # Thêm retain_graph=True
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+        self.actor_optimizer.step()
+        
+        # Update critic
+        self.critic_optimizer.zero_grad()
+        value_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
+        self.critic_optimizer.step()
+        
+        # Decrease epsilon
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         
         # Reset memory
@@ -174,6 +198,7 @@ class Policy2210xxx(Policy):
         self.actions = []
         self.rewards = []
         self.log_probs = []
+        self.values = []
 
     def _decode_action(self, action_idx, observation):
         # Giữ nguyên phần decode_action như cũ
