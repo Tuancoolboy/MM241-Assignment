@@ -21,6 +21,20 @@ class PolicyNetwork(nn.Module):
         # Use log_softmax instead of softmax to avoid numerical issues
         return torch.nn.functional.log_softmax(logits, dim=-1)
 
+class CriticNetwork(nn.Module):
+    def __init__(self, state_dim):
+        super(CriticNetwork, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(state_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)  # Output is the state value V(s)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+
 class Policy2210xxx(Policy):
     def __init__(self):
         self.state_dim = 200
@@ -31,10 +45,25 @@ class Policy2210xxx(Policy):
         self.epsilon_decay = 0.995
         self.epsilon_min = 0.01
         
-        # Khởi tạo device
+        # Initialize device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy_network = PolicyNetwork(self.state_dim, self.action_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy_network.parameters(), lr=self.learning_rate)
+
+        # Add new parameters
+        self.value_coef = 0.5  # Coefficient for value loss
+        self.entropy_coef = 0.01  # Coefficient for entropy regularization
+        
+        # Initialize actor (policy) and critic networks
+        self.actor = PolicyNetwork(self.state_dim, self.action_dim).to(self.device)
+        self.critic = CriticNetwork(self.state_dim).to(self.device)
+        
+        # Initialize optimizers for actor and critic
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.learning_rate)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.learning_rate)
+        
+        # Add list to store state values
+        self.values = []
         
         self.states = []
         self.actions = []
@@ -45,7 +74,7 @@ class Policy2210xxx(Policy):
         stocks = observation["stocks"]
         products = observation["products"]
         
-        # Chuẩn hóa features
+        # Normalize features
         stocks_features = []
         total_space = 0
         used_space = 0
@@ -56,19 +85,19 @@ class Policy2210xxx(Policy):
             used = (stock_array >= 0).sum()
             total_space += available + used
             used_space += used
-            stocks_features.extend([available/100.0, used/100.0])  # Chuẩn hóa giá trị
+            stocks_features.extend([available/100.0, used/100.0])  # Normalize values
             
-        # Thêm tỷ lệ sử dụng tổng thể
+        # Add overall usage ratio
         stocks_features.append(used_space/max(1, total_space))
         
-        # Chuẩn hóa thông tin sản phẩm
+        # Normalize product information
         products_features = []
         total_demand = 0
         for prod in products:
             size = prod["size"]
             quantity = prod["quantity"]
             total_demand += quantity * size[0] * size[1]
-            products_features.extend([size[0]/10.0, size[1]/10.0, quantity/10.0])  # Chuẩn hóa giá trị
+            products_features.extend([size[0]/10.0, size[1]/10.0, quantity/10.0])  # Normalize values
             
         # Padding features
         stocks_features = np.array(stocks_features, dtype=np.float32)
@@ -88,16 +117,21 @@ class Policy2210xxx(Policy):
     def get_action(self, observation, info):
         state = self._encode_state(observation)
         
+        # Get value prediction from critic
+        with torch.no_grad():
+            state_value = self.critic(state)
+            self.values.append(state_value)
+        
         if np.random.random() < self.epsilon:
             action_idx = np.random.randint(0, self.action_dim)
         else:
             with torch.no_grad():
-                log_probs = self.policy_network(state)
+                log_probs = self.actor(state)
                 probs = torch.exp(log_probs)
                 action_idx = torch.multinomial(probs, 1).item()
         
-        # Lưu log probability cho training
-        log_prob = self.policy_network(state)[action_idx]
+        # Store log probability for training
+        log_prob = self.actor(state)[action_idx]
         self.log_probs.append(log_prob)
         self.states.append(state)
         self.actions.append(action_idx)
